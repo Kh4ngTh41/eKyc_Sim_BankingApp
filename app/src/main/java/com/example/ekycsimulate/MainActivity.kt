@@ -1,3 +1,4 @@
+// In file: app/src/main/java/com/example/ekycsimulate/MainActivity.kt
 package com.example.ekycsimulate
 
 import android.os.Bundle
@@ -5,41 +6,46 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.Composable
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.example.ekycsimulate.ui.auth.ConfirmInfoScreen
 import com.example.ekycsimulate.ui.auth.LandingScreen
 import com.example.ekycsimulate.ui.theme.EkycSimulateTheme
+// Sửa lại đường dẫn import cho đúng
+import com.example.ekycsimulate.ui.viewmodel.EkycViewModel
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             EkycSimulateTheme {
-                // Gọi hàm AppNavigation
+                // Gọi hàm điều hướng chính của ứng dụng
                 AppNavigation()
             }
         }
     }
 }
 
-// Định nghĩa các "đường dẫn" đến màn hình
+// Định nghĩa các "đường dẫn" đến màn hình để tránh gõ sai
 object AppRoutes {
     const val LANDING = "landing"
     const val EKYC_CAMERA = "ekyc_camera"
+    const val CONFIRM_INFO = "confirm_info"
 }
 
 @Composable
 fun AppNavigation() {
-    // Tạo một NavController để quản lý việc điều hướng
     val navController = rememberNavController()
+    // Tạo một instance của ViewModel. Nó sẽ được chia sẻ cho tất cả các màn hình trong NavHost này.
+    val ekycViewModel: EkycViewModel = viewModel()
 
-    // NavHost là nơi chứa các màn hình có thể điều hướng đến
     NavHost(
         navController = navController,
         startDestination = AppRoutes.LANDING // Màn hình bắt đầu
     ) {
-        // Định nghĩa màn hình Chào mừng
+        // 1. Định nghĩa màn hình Chào mừng
         composable(route = AppRoutes.LANDING) {
             LandingScreen(
                 onLoginClicked = {
@@ -52,17 +58,44 @@ fun AppNavigation() {
             )
         }
 
-        // Định nghĩa màn hình Camera
+        // 2. Định nghĩa màn hình Camera (CHỈ CÓ MỘT ĐỊNH NGHĨA DUY NHẤT)
         composable(route = AppRoutes.EKYC_CAMERA) {
             EkycCameraScreen(
-                onImageCaptured = { uri ->
-                    // Sau khi chụp ảnh xong, chúng ta nhận được Uri
-                    Log.d("Navigation", "Ảnh đã được chụp: $uri")
-                    // Quay lại màn hình trước đó (LandingScreen)
-                    navController.popBackStack()
-                    // TODO: Trong tương lai, chúng ta sẽ đi đến bước tiếp theo thay vì quay lại
+                // Callback này được gọi sau khi ảnh đã được chụp và cắt thành công
+                onImageCropped = { croppedBitmap ->
+                    // 1. Lưu ảnh Bitmap đã cắt vào instance của SharedViewModel
+                    ekycViewModel.croppedImage = croppedBitmap
+                    Log.d("AppNavigation", "Đã nhận và lưu Bitmap đã cắt.")
+
+                    // 2. Điều hướng sang màn hình xác nhận thông tin
+                    navController.navigate(AppRoutes.CONFIRM_INFO)
                 }
             )
+        }
+
+        // 3. Định nghĩa màn hình xác nhận thông tin (CHỈ CÓ MỘT ĐỊNH NGHĨA DUY NHẤT)
+        composable(route = AppRoutes.CONFIRM_INFO) {
+            // Lấy ảnh đã cắt từ SharedViewModel
+            val bitmap = ekycViewModel.croppedImage
+
+            if (bitmap != null) {
+                ConfirmInfoScreen(
+                    croppedBitmap = bitmap,
+                    onNextStep = { idCardInfo ->
+                        Log.d("EKYC_Flow", "Xác nhận thông tin thành công: $idCardInfo")
+                        // TODO: Điều hướng đến bước tiếp theo (chụp ảnh khuôn mặt)
+
+                        // Tạm thời quay lại màn hình chính và dọn dẹp ViewModel
+                        ekycViewModel.croppedImage = null // Giải phóng bộ nhớ
+                        navController.popBackStack(AppRoutes.LANDING, inclusive = false)
+                    }
+                )
+            } else {
+                // Xử lý trường hợp người dùng vào màn hình này mà không có ảnh (ví dụ: do process death).
+                // An toàn nhất là quay lại màn hình trước đó.
+                Log.e("AppNavigation", "Bitmap bị null, quay lại màn hình trước.")
+                navController.popBackStack()
+            }
         }
     }
 }

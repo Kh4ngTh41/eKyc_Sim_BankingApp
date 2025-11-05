@@ -42,6 +42,7 @@ android {
 }
 
 dependencies {
+    // Các dependency mặc định
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
@@ -57,29 +58,30 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
-    implementation("androidx.core:core-ktx:1.13.1")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
-    implementation("androidx.activity:activity-compose:1.9.3")
-// CameraX (nếu chưa có)
+
+    // CameraX
     implementation("androidx.camera:camera-core:1.3.4")
     implementation("androidx.camera:camera-camera2:1.3.4")
     implementation("androidx.camera:camera-lifecycle:1.3.4")
     implementation("androidx.camera:camera-view:1.3.4")
     implementation("androidx.camera:camera-extensions:1.3.4")
-    implementation("androidx.navigation:navigation-compose:2.7.7") // Hoặc phiên bản mới nhất
-
-// ML Kit on-device (face detection + text recognition
+    implementation("io.ktor:ktor-client-android:2.3.12")
+    implementation("io.ktor:ktor-client-content-negotiation:2.3.12")
+    // Navigation
+    implementation("androidx.navigation:navigation-compose:2.7.7")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.3")
+    // ML Kit - Text Recognition (Bao gồm cả Tiếng Việt)
+    implementation("com.google.mlkit:text-recognition:16.0.0")
+    implementation("com.google.mlkit:barcode-scanning:17.2.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
+    // Các thư viện UI phụ trợ
     implementation("androidx.compose.material:material-icons-extended-android:1.6.7")
-    implementation("com.google.mlkit:text-recognition:16.0.0") // Latin OCR
     implementation("io.coil-kt:coil-compose:2.6.0")
-
-    // Compose
-    implementation(platform("androidx.compose:compose-bom:2024.10.01"))
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.activity:activity-compose:1.9")
-    // CameraX
-    implementation("androidx.camera:camera-camera2:1.3.4")
-    implementation("androidx.camera:camera-lifecycle:1.3.4")
-    implementation("androidx.camera:camera-view:1.3.4")
+    implementation("org.opencv:opencv-android:4.9.0")
+// kiểm tra phiên bản mới nhất
+// Jetpack Compose + material3 (nếu chưa có)
+    implementation("androidx.compose.material3:material3:1.1.1")
+// dùng phiên bản project của bạn
+// Kotlin coroutines
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android")
 }

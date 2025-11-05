@@ -1,7 +1,11 @@
+// In file: app/src/main/java/com/example/ekycsimulate/EkycCameraScreen.kt
 package com.example.ekycsimulate
 
 import android.Manifest
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.net.Uri
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -11,34 +15,58 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.view.LifecycleCameraController
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-// Import icon PhotoCamera từ gói 'extended'
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathOperation
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import java.io.File
 import java.util.concurrent.Executor
+import kotlin.math.max
+import kotlin.math.min
 
 @Composable
 fun EkycCameraScreen(
-    onImageCaptured: (Uri) -> Unit
+    // THAY ĐỔI QUAN TRỌNG: Callback giờ nhận một Bitmap đã được cắt
+    onImageCropped: (Bitmap) -> Unit
 ) {
     val context = LocalContext.current
     var hasCameraPermission by remember { mutableStateOf(false) }
+
+    // State để lưu kích thước của PreviewView để tính toán cropRect
+    var previewSize by remember { mutableStateOf(IntSize.Zero) }
+    val cropRect: Rect? = remember(previewSize) {
+        if (previewSize == IntSize.Zero) return@remember null
+        val frameWidth = previewSize.width * 0.9f
+        val frameHeight = frameWidth * (54f / 85.6f) // Tỷ lệ thẻ CCCD
+        val left = (previewSize.width - frameWidth) / 2
+        val top = (previewSize.height - frameHeight) / 2
+        Rect(left, top, left + frameWidth, top + frameHeight)
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -52,8 +80,16 @@ fun EkycCameraScreen(
 
     if (hasCameraPermission) {
         CameraView(
-            context = context,
-            onImageCaptured = onImageCaptured
+            onPreviewSizeChanged = { previewSize = it },
+            cropRect = cropRect, // Truyền cropRect vào để vẽ
+            onImageCaptured = { fullImageUri, imageRotation ->
+                // Sau khi chụp, thực hiện cắt ảnh
+                cropRect?.let { rect ->
+                    Log.d("EkycCameraScreen", "Bắt đầu cắt ảnh...")
+                    val croppedBitmap = cropImage(context, fullImageUri, rect, imageRotation, previewSize)
+                    onImageCropped(croppedBitmap)
+                } ?: Log.e("EkycCameraScreen", "Không thể cắt ảnh vì cropRect is null.")
+            }
         )
     } else {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -64,46 +100,82 @@ fun EkycCameraScreen(
 
 @Composable
 private fun CameraView(
-    context: Context,
-    onImageCaptured: (Uri) -> Unit
+    onPreviewSizeChanged: (IntSize) -> Unit,
+    cropRect: Rect?,
+    // Callback giờ trả về cả Uri và góc xoay của ảnh
+    onImageCaptured: (Uri, Int) -> Unit
 ) {
+    val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraController = remember { LifecycleCameraController(context) }
 
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        floatingActionButton = {
-            FloatingActionButton(onClick = {
-                val executor = ContextCompat.getMainExecutor(context)
-                // Truyền context vào hàm captureImage
-                captureImage(context, cameraController, executor, onImageCaptured)
-            }) {
-                Icon(imageVector = Icons.Filled.PhotoCamera, contentDescription = "Chụp ảnh")
-            }
-        }
-    ) { paddingValues ->
+    Box(modifier = Modifier.fillMaxSize()) {
         AndroidView(
-            modifier = Modifier.fillMaxSize().padding(paddingValues),
+            modifier = Modifier
+                .fillMaxSize()
+                .onSizeChanged { onPreviewSizeChanged(it) }, // Lấy kích thước của PreviewView
             factory = {
                 PreviewView(it).apply {
-                    controller = cameraController
+                    this.controller = cameraController
+                    // Đặt chế độ scale để khớp với cách tính toán của chúng ta
+                    this.scaleType = PreviewView.ScaleType.FILL_CENTER
                     cameraController.bindToLifecycle(lifecycleOwner)
                     cameraController.cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
                 }
             }
         )
+
+        // Chỉ vẽ overlay khi đã có cropRect
+        cropRect?.let {
+            CameraOverlay(frameRect = it)
+        }
+
+        Text(
+            text = "Vui lòng đặt CCCD vào trong khung",
+            color = Color.White,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = 64.dp)
+        )
+
+        FloatingActionButton(
+            onClick = {
+                val executor = ContextCompat.getMainExecutor(context)
+                captureImage(context, cameraController, executor, onImageCaptured)
+            },
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 64.dp)
+        ) {
+            Icon(imageVector = Icons.Filled.PhotoCamera, contentDescription = "Chụp ảnh")
+        }
+    }
+}
+
+@Composable
+fun CameraOverlay(frameRect: Rect) {
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val outerPath = Path().apply { addRect(Rect(0f, 0f, size.width, size.height)) }
+        val innerPath = Path().apply { addRect(frameRect) }
+
+        clipPath(Path.combine(PathOperation.Difference, outerPath, innerPath)) {
+            drawRect(Color.Black.copy(alpha = 0.5f))
+        }
+
+        drawRect(
+            color = Color.Green,
+            topLeft = frameRect.topLeft,
+            size = frameRect.size,
+            style = Stroke(width = 5.dp.toPx())
+        )
     }
 }
 
 private fun captureImage(
-    // Thêm context vào tham số
     context: Context,
     cameraController: LifecycleCameraController,
     executor: Executor,
-    onImageCaptured: (Uri) -> Unit
+    onImageCaptured: (Uri, Int) -> Unit
 ) {
-    // Sử dụng context được truyền vào để tạo file
-    val file = File.createTempFile("ekyc-", ".jpg", context.cacheDir)
+    val file = File.createTempFile("ekyc-full-", ".jpg", context.cacheDir)
     val outputOptions = ImageCapture.OutputFileOptions.Builder(file).build()
 
     cameraController.takePicture(
@@ -111,13 +183,85 @@ private fun captureImage(
         executor,
         object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                Log.d("CameraCapture", "Ảnh đã được lưu tại: ${outputFileResults.savedUri}")
-                outputFileResults.savedUri?.let(onImageCaptured)
+                val savedUri = outputFileResults.savedUri
+                if (savedUri != null) {
+                    val image = try {
+                        context.contentResolver.openInputStream(savedUri)?.use {
+                            androidx.exifinterface.media.ExifInterface(it)
+                        }
+                    } catch (e: Exception) {
+                        null
+                    }
+                    val rotation = image?.rotationDegrees ?: 0
+                    Log.d("CameraCapture", "Ảnh đã lưu tại: $savedUri, Góc xoay: $rotation")
+                    onImageCaptured(savedUri, rotation)
+                }
             }
 
             override fun onError(exception: ImageCaptureException) {
                 Log.e("CameraCapture", "Lỗi khi chụp ảnh: ${exception.message}", exception)
             }
         }
+    )
+}
+
+// HÀM CẮT ẢNH ĐÃ ĐƯỢC SỬA LẠI HOÀN CHỈNH
+private fun cropImage(
+    context: Context,
+    uri: Uri,
+    cropRect: Rect,
+    imageRotation: Int,
+    previewSize: IntSize
+): Bitmap {
+    val inputStream = context.contentResolver.openInputStream(uri)
+    val originalBitmap = BitmapFactory.decodeStream(inputStream)
+
+    // 1. Xoay ảnh gốc về đúng hướng hiển thị
+    val matrix = Matrix().apply { postRotate(imageRotation.toFloat()) }
+    val rotatedBitmap = Bitmap.createBitmap(
+        originalBitmap, 0, 0, originalBitmap.width, originalBitmap.height, matrix, true
+    )
+
+    // 2. Tính toán tỷ lệ giữa PreviewView và ảnh thật
+    // Do dùng scaleType = FILL_CENTER, một trong hai chiều của ảnh sẽ bị cắt bớt
+    // để lấp đầy PreviewView mà không làm méo ảnh.
+    val scaleX = rotatedBitmap.width.toFloat() / previewSize.width
+    val scaleY = rotatedBitmap.height.toFloat() / previewSize.height
+
+    // Tỷ lệ scale cuối cùng là tỷ lệ nhỏ hơn, vì đó là chiều được lấp đầy hoàn toàn
+    val scale = min(scaleX, scaleY)
+
+    // Tọa độ bắt đầu của vùng ảnh được hiển thị trên PreviewView
+    val offsetX = (rotatedBitmap.width - previewSize.width * scale) / 2f
+    val offsetY = (rotatedBitmap.height - previewSize.height * scale) / 2f
+
+    // 3. Tính tọa độ của khung cắt (màu xanh) trên ảnh thật
+    val cropXOnBitmap = cropRect.left * scale + offsetX
+    val cropYOnBitmap = cropRect.top * scale + offsetY
+    val cropWidthOnBitmap = cropRect.width * scale
+    val cropHeightOnBitmap = cropRect.height * scale
+
+    // 4. Đảm bảo tọa độ cắt không nằm ngoài ảnh thật
+    val finalCropX = max(0f, cropXOnBitmap).toInt()
+    val finalCropY = max(0f, cropYOnBitmap).toInt()
+
+    val finalCropWidth = if (finalCropX + cropWidthOnBitmap > rotatedBitmap.width) rotatedBitmap.width - finalCropX else cropWidthOnBitmap.toInt()
+    val finalCropHeight = if (finalCropY + cropHeightOnBitmap > rotatedBitmap.height) rotatedBitmap.height - finalCropY else cropHeightOnBitmap.toInt()
+
+    // 5. Kiểm tra lần cuối để tránh crash
+    if (finalCropWidth <= 0 || finalCropHeight <= 0) {
+        Log.e("CropImage", "Kích thước cắt không hợp lệ! Trả về ảnh gốc.")
+        return rotatedBitmap
+    }
+
+    Log.d("CropImage", "Thực hiện cắt tại (x,y,w,h): ($finalCropX, $finalCropY, $finalCropWidth, $finalCropHeight) trên ảnh kích thước ${rotatedBitmap.width}x${rotatedBitmap.height}")
+
+    // 6. Thực hiện cắt và trả về
+    return Bitmap.createBitmap(
+        rotatedBitmap,
+        finalCropX,
+        finalCropY,
+        finalCropWidth,
+        finalCropHeight
     )
 }
