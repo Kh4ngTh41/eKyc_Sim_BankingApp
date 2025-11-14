@@ -34,29 +34,48 @@ data class IdCardInfo(
     val dob: String = "",
     val address: String = "",
     val origin: String = "",
-    val source: String = "N/A"
+    val source: String = "N/A",
+    val confidence: Float = 0f,
+    val warnings: List<String> = emptyList()
 )
 
 @Composable
 fun ConfirmInfoScreen(
     croppedBitmap: Bitmap,
-    onNextStep: (IdCardInfo) -> Unit
+    onNextStep: (IdCardInfo) -> Unit,
+    onRetake: () -> Unit
 ) {
     var idCardInfo by remember { mutableStateOf<IdCardInfo?>(null) }
     var isProcessing by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var requiresRetake by remember { mutableStateOf(false) }
 
     LaunchedEffect(croppedBitmap) {
         isProcessing = true
         errorMessage = null
+        requiresRetake = false
         withContext(Dispatchers.Default) {
             try {
-                val variants = ImageProcessor.generateVariants(croppedBitmap)
+                val prep = ImageProcessor.prepareForOcr(croppedBitmap)
+                val variants = prep.variants
+                val globalWarnings = mutableSetOf<String>()
+
+                if (prep.diagnostics.isOverexposed) {
+                    globalWarnings += "exposure_overexposed"
+                }
+                if (prep.diagnostics.isUnderexposed) {
+                    globalWarnings += "exposure_underexposed"
+                }
+                if (prep.diagnostics.shouldRequestRecapture) {
+                    globalWarnings += "exposure_request_retake"
+                }
+
                 val qropts = BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
                 val qrScanner = BarcodeScanning.getClient(qropts)
                 val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
                 val candidates = mutableListOf<IdCardInfo>()
+                var variantProcessed = 0
 
                 // Try QR first across variants (fast)
                 for ((i, bmp) in variants.withIndex()) {
@@ -65,7 +84,6 @@ fun ConfirmInfoScreen(
                         val barcodes = qrScanner.process(input).await()
                         val qr = barcodes.firstOrNull()?.rawValue
                         if (!qr.isNullOrBlank()) {
-                            // parse QR (implement parseQrData accordingly)
                             val parsed = parseQrData(qr)
                             idCardInfo = parsed
                             isProcessing = false
@@ -79,22 +97,55 @@ fun ConfirmInfoScreen(
                 // OCR: run on each variant, parse single-pass, keep candidate list
                 for ((i, bmp) in variants.withIndex()) {
                     try {
+                        val diag = ImageProcessor.analyzeIllumination(bmp)
+                        if (diag.isSeverelyOverexposed) {
+                            globalWarnings += "variant_saturated"
+                            Log.w("ConfirmInfo", "Skip variant $i due to severe glare (brightRatio=${diag.brightRatio})")
+                            continue
+                        }
                         val visionText: Text = textRecognizer.process(InputImage.fromBitmap(bmp, 0)).await()
                         val parsed = parseOcrTextSinglePass(visionText)
                         candidates.add(parsed)
+                        variantProcessed++
                     } catch (e: Exception) {
                         Log.w("ConfirmInfo", "OCR variant $i fail: ${e.message}")
                     }
                 }
 
+                if (variantProcessed == 0 && candidates.isEmpty()) {
+                    errorMessage = "Không thể đọc được CCCD do ảnh bị hắt sáng hoặc che khuất. Vui lòng chụp lại."
+                    idCardInfo = null
+                    requiresRetake = true
+                    return@withContext
+                }
+
                 // majority vote
                 val voted = majorityVote(candidates)
-                // Optionally verify some sanity checks: ID length, name length, DOB non-empty
-                val sanityOk = voted.idNumber.length in 9..12 && voted.fullName.length >= 4
-                idCardInfo = if (sanityOk) voted else voted.copy(source = voted.source + "/LOW_CONF")
+                val finalWarnings = (voted.warnings + globalWarnings).distinct()
+                val adjustedConfidence = (if (globalWarnings.isEmpty()) voted.confidence else (voted.confidence * 0.85f)).coerceIn(0f, 1f)
+                val finalInfo = voted.copy(warnings = finalWarnings, confidence = adjustedConfidence)
 
-                if (!sanityOk) {
-                    errorMessage = "Không chắc chắn về dữ liệu. Vui lòng chụp lại nếu thấy sai."
+                val needsManualReview = finalInfo.confidence < 0.6f ||
+                    finalInfo.idNumber.isBlank() ||
+                    finalInfo.idNumber.any { !it.isDigit() } ||
+                    finalInfo.fullName.isBlank() ||
+                    finalInfo.dob.isBlank()
+
+                val updatedSource = if (needsManualReview && !finalInfo.source.contains("REVIEW")) {
+                    finalInfo.source + "/REVIEW"
+                } else finalInfo.source
+
+                idCardInfo = finalInfo.copy(source = updatedSource)
+                requiresRetake = needsManualReview
+
+                errorMessage = when {
+                    needsManualReview && finalWarnings.contains("exposure_overexposed") ->
+                        "Ảnh có vùng bị hắt sáng khiến dữ liệu thiếu. Hãy chụp lại ở góc khác."
+                    needsManualReview ->
+                        "Không chắc chắn về dữ liệu. Vui lòng kiểm tra và chụp lại nếu thấy sai."
+                    finalWarnings.contains("exposure_request_retake") ->
+                        "Ảnh có thể bị lóa, bạn nên cân nhắc chụp lại nếu thông tin chưa rõ."
+                    else -> null
                 }
             } catch (e: Exception) {
                 Log.e("ConfirmInfo", "Unexpected error: ${e.message}", e)
@@ -110,11 +161,27 @@ fun ConfirmInfoScreen(
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         bottomBar = {
-            Button(
-                onClick = { editedInfo?.let(onNextStep) },
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
-                enabled = editedInfo != null && !isProcessing
-            ) { Text("Tiếp tục") }
+            Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                if (requiresRetake) {
+                    Text(
+                        "Không thu thập đủ thông tin bắt buộc. Vui lòng chụp lại CCCD.",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = onRetake,
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isProcessing
+                    ) { Text("Chụp lại CCCD") }
+                } else {
+                    Button(
+                        onClick = { editedInfo?.let(onNextStep) },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = editedInfo != null && !isProcessing
+                    ) { Text("Tiếp tục") }
+                }
+            }
         }
     ) { paddingValues ->
         Column(
@@ -142,16 +209,43 @@ fun ConfirmInfoScreen(
                 editedInfo != null -> {
                     val info = editedInfo!!
                     Text("Nguồn: ${info.source}", style = MaterialTheme.typography.labelSmall)
+                    if (info.warnings.isNotEmpty()) {
+                        Spacer(Modifier.height(6.dp))
+                        val messages = info.warnings.map(::mapWarningToMessage).distinct()
+                        for (message in messages) {
+                            Text("[!] $message", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
+                        }
+                    }
                     Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(value = info.idNumber, onValueChange = { editedInfo = info.copy(idNumber = it) }, label = { Text("Số CCCD") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = info.idNumber, onValueChange = {
+                        errorMessage = null
+                        val updatedWarnings = info.warnings.filterNot { code -> code == "id_length_out_of_range" || code == "id_placeholder" }
+                        editedInfo = info.copy(idNumber = it, warnings = updatedWarnings)
+                    }, label = { Text("Số CCCD") }, modifier = Modifier.fillMaxWidth())
                     Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(value = info.fullName, onValueChange = { editedInfo = info.copy(fullName = it) }, label = { Text("Họ và tên") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = info.fullName, onValueChange = {
+                        errorMessage = null
+                        val updatedWarnings = info.warnings.filterNot { code -> code == "missing_name" }
+                        editedInfo = info.copy(fullName = it, warnings = updatedWarnings)
+                    }, label = { Text("Họ và tên") }, modifier = Modifier.fillMaxWidth())
                     Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(value = info.dob, onValueChange = { editedInfo = info.copy(dob = it) }, label = { Text("Ngày sinh") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = info.dob, onValueChange = {
+                        errorMessage = null
+                        val updatedWarnings = info.warnings.filterNot { code -> code == "missing_dob" }
+                        editedInfo = info.copy(dob = it, warnings = updatedWarnings)
+                    }, label = { Text("Ngày sinh") }, modifier = Modifier.fillMaxWidth())
                     Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(value = info.origin, onValueChange = { editedInfo = info.copy(origin = it) }, label = { Text("Quê quán") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = info.origin, onValueChange = {
+                        errorMessage = null
+                        val updatedWarnings = info.warnings.filterNot { code -> code == "missing_origin" }
+                        editedInfo = info.copy(origin = it, warnings = updatedWarnings)
+                    }, label = { Text("Quê quán") }, modifier = Modifier.fillMaxWidth())
                     Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(value = info.address, onValueChange = { editedInfo = info.copy(address = it) }, label = { Text("Nơi thường trú") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = info.address, onValueChange = {
+                        errorMessage = null
+                        val updatedWarnings = info.warnings.filterNot { code -> code == "missing_address" }
+                        editedInfo = info.copy(address = it, warnings = updatedWarnings)
+                    }, label = { Text("Nơi thường trú") }, modifier = Modifier.fillMaxWidth())
                 }
             }
             Spacer(Modifier.height(36.dp))
@@ -178,9 +272,24 @@ private fun parseQrData(qrRaw: String): IdCardInfo {
             "${dobRaw.substring(0,2)}/${dobRaw.substring(2,4)}/${dobRaw.substring(4)}"
         } else dobRaw
 
-        return IdCardInfo(idNumber = idCandidate, fullName = nameCandidate, dob = formattedDob, address = addressCandidate, origin = "", source = "QR")
+        return IdCardInfo(idNumber = idCandidate, fullName = nameCandidate, dob = formattedDob, address = addressCandidate, origin = "", source = "QR", confidence = 0.95f)
     } catch (t: Throwable) {
         Log.w("ConfirmInfo", "parseQrData fail: ${t.message}")
         return IdCardInfo(source = "QR_ERROR")
     }
+}
+
+private fun mapWarningToMessage(code: String): String = when (code) {
+    "exposure_overexposed" -> "Ảnh có vùng bị hắt sáng, OCR có thể bỏ sót ký tự."
+    "exposure_underexposed" -> "Ảnh hơi tối, hãy đảm bảo đủ ánh sáng."
+    "exposure_request_retake" -> "Đề xuất chụp lại ảnh do ánh sáng không phù hợp."
+    "variant_saturated" -> "Một số biến thể ảnh bị lóa đã được loại bỏ khỏi xử lý."
+    "id_length_out_of_range" -> "Số CCCD chưa đúng định dạng 12 ký tự."
+    "id_placeholder" -> "Số CCCD chứa ký tự không rõ, 'X' đánh dấu vị trí cần bổ sung."
+    "missing_name" -> "Không nhận diện được Họ và tên."
+    "missing_dob" -> "Không nhận diện được Ngày sinh."
+    "missing_origin" -> "Không nhận diện được Quê quán."
+    "missing_address" -> "Không nhận diện được Nơi thường trú."
+    "no_candidates" -> "Không tạo được bản OCR hợp lệ, cần chụp lại."
+    else -> "Cần kiểm tra lại thông tin: $code"
 }
