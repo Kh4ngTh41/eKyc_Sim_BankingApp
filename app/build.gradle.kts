@@ -77,11 +77,13 @@ dependencies {
     // Các thư viện UI phụ trợ
     implementation("androidx.compose.material:material-icons-extended-android:1.6.7")
     implementation("io.coil-kt:coil-compose:2.6.0")
-    implementation("org.opencv:opencv-android:4.9.0")
+    // OpenCV: The coordinate org.opencv:opencv-android is not available on Google/MavenCentral/JitPack.
+    // Remove for now to fix sync. If you need OpenCV, import the OpenCV Android SDK as a module
+    // or use a community AAR published to Maven. See notes in the PR/Chat.
 // kiểm tra phiên bản mới nhất
 // Jetpack Compose + material3 (nếu chưa có)
     implementation("androidx.compose.material3:material3:1.1.1")
 // dùng phiên bản project của bạn
 // Kotlin coroutines
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 }

@@ -88,6 +88,10 @@ fun AppNavigation() {
                         // Tạm thời quay lại màn hình chính và dọn dẹp ViewModel
                         ekycViewModel.croppedImage = null // Giải phóng bộ nhớ
                         navController.popBackStack(AppRoutes.LANDING, inclusive = false)
+                    },
+                    onRetake = {
+                        ekycViewModel.croppedImage = null
+                        navController.popBackStack()
                     }
                 )
             } else {

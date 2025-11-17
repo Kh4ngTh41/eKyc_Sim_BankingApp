@@ -5,6 +5,23 @@ import android.util.Log
 import androidx.core.graphics.applyCanvas
 import kotlin.math.roundToInt
 
+data class IlluminationDiagnostics(
+    val brightRatio: Float,
+    val darkRatio: Float,
+    val meanLuma: Float,
+    val sampleCount: Int
+) {
+    val isOverexposed: Boolean get() = brightRatio > 0.18f && meanLuma > 0.55f
+    val isSeverelyOverexposed: Boolean get() = brightRatio > 0.32f
+    val isUnderexposed: Boolean get() = darkRatio > 0.28f && meanLuma < 0.42f
+    val shouldRequestRecapture: Boolean get() = isSeverelyOverexposed || (isOverexposed && meanLuma > 0.62f)
+}
+
+data class OcrPreparationResult(
+    val variants: List<Bitmap>,
+    val diagnostics: IlluminationDiagnostics
+)
+
 object ImageProcessor {
     private const val TAG = "ImageProcessor"
 
@@ -29,19 +46,41 @@ object ImageProcessor {
      * Generate multiple image variants used for multi-pass voting.
      */
     fun generateVariants(original: Bitmap): List<Bitmap> {
+        return prepareForOcr(original).variants
+    }
+
+    /** Prepare variants plus diagnostics so caller can detect exposure problems. */
+    fun prepareForOcr(original: Bitmap, maxVariants: Int = 8): OcrPreparationResult {
+        val diagnostics = analyzeIllumination(original)
         val variants = mutableListOf<Bitmap>()
-        variants.add(original)
-        // main cleaned image
+        fun addVariant(bitmap: Bitmap) {
+            if (variants.none { it === bitmap }) variants.add(bitmap)
+        }
+
+        addVariant(original)
+
+        if (diagnostics.isOverexposed || diagnostics.isSeverelyOverexposed) {
+            addVariant(reduceSpecularHighlights(original))
+            addVariant(changeContrastAndBrightness(original, 1.2f, -60f))
+        }
+
+        if (diagnostics.isUnderexposed) {
+            addVariant(boostShadows(original))
+            addVariant(changeContrastAndBrightness(original, 1.5f, 35f))
+        }
+
         val cleaned = runAdvancedPreprocessing(original)
-        variants.add(cleaned)
-        // different contrast/brightness combos
-        variants.add(changeContrastAndBrightness(original, 1.6f, -30f))
-        variants.add(changeContrastAndBrightness(original, 2.0f, -50f))
-        // grayscale and sharpen combos
-        variants.add(sharpen(toGrayscale(original)))
-        variants.add(binaryThreshold(toGrayscale(original)))
-        Log.d(TAG, "Generated ${variants.size} variants for OCR")
-        return variants
+        addVariant(cleaned)
+        addVariant(changeContrastAndBrightness(cleaned, 1.4f, -20f))
+        addVariant(sharpen(toGrayscale(original)))
+        addVariant(binaryThreshold(toGrayscale(original)))
+
+        if (variants.size > maxVariants) {
+            variants.subList(maxVariants, variants.size).clear()
+        }
+
+        Log.d(TAG, "Generated ${variants.size} variants for OCR (brightRatio=${diagnostics.brightRatio}, darkRatio=${diagnostics.darkRatio})")
+        return OcrPreparationResult(variants, diagnostics)
     }
 
     // ---------- IMAGE OPS (Kotlin fallback) ----------
@@ -131,6 +170,68 @@ object ImageProcessor {
         val resultBitmap = Bitmap.createBitmap(width, height, src.config ?: Bitmap.Config.ARGB_8888)
         resultBitmap.setPixels(resultPixels, 0, width, 0, 0, width, height)
         return resultBitmap
+    }
+
+    fun analyzeIllumination(bitmap: Bitmap, sampleStep: Int = 12): IlluminationDiagnostics {
+        val width = bitmap.width
+        val height = bitmap.height
+        var bright = 0
+        var dark = 0
+        var total = 0
+        var sumLuma = 0f
+        for (y in 0 until height step sampleStep) {
+            for (x in 0 until width step sampleStep) {
+                val pixel = bitmap.getPixel(x, y)
+                val luma = (Color.red(pixel) * 0.299f + Color.green(pixel) * 0.587f + Color.blue(pixel) * 0.114f) / 255f
+                if (luma > 0.85f) bright++
+                if (luma < 0.12f) dark++
+                sumLuma += luma
+                total++
+            }
+        }
+        val mean = if (total == 0) 0f else sumLuma / total
+        val brightRatio = if (total == 0) 0f else bright.toFloat() / total
+        val darkRatio = if (total == 0) 0f else dark.toFloat() / total
+        return IlluminationDiagnostics(brightRatio, darkRatio, mean, total)
+    }
+
+    private fun reduceSpecularHighlights(src: Bitmap): Bitmap {
+        val width = src.width
+        val height = src.height
+        val result = Bitmap.createBitmap(width, height, src.config ?: Bitmap.Config.ARGB_8888)
+        val hsv = FloatArray(3)
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val pixel = src.getPixel(x, y)
+                Color.colorToHSV(pixel, hsv)
+                if (hsv[2] > 0.78f) {
+                    val excess = hsv[2] - 0.78f
+                    hsv[2] = 0.78f + excess * 0.25f
+                    hsv[1] = (hsv[1] * 0.85f).coerceAtLeast(0f)
+                }
+                result.setPixel(x, y, Color.HSVToColor(Color.alpha(pixel), hsv))
+            }
+        }
+        return result
+    }
+
+    private fun boostShadows(src: Bitmap): Bitmap {
+        val width = src.width
+        val height = src.height
+        val result = Bitmap.createBitmap(width, height, src.config ?: Bitmap.Config.ARGB_8888)
+        val hsv = FloatArray(3)
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val pixel = src.getPixel(x, y)
+                Color.colorToHSV(pixel, hsv)
+                if (hsv[2] < 0.35f) {
+                    val deficit = 0.35f - hsv[2]
+                    hsv[2] = (hsv[2] + deficit * 0.6f).coerceAtMost(0.55f)
+                }
+                result.setPixel(x, y, Color.HSVToColor(Color.alpha(pixel), hsv))
+            }
+        }
+        return result
     }
 
     // ---------- OPTIONAL: OpenCV-based preprocess (if OpenCV available) ----------
