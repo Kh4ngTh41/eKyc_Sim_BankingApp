@@ -111,6 +111,7 @@ fun AppNavigation() {
             if (idInfo != null) {
                 FaceScanScreen(
                     idCardInfo = idInfo,
+                    croppedImage = ekycViewModel.croppedImage,
                     onEnrollmentComplete = { jsonPayload ->
                         // Payload is ready to send to server
                         Log.d("EKYC_ZKP", "Enrollment Payload:\n$jsonPayload")
