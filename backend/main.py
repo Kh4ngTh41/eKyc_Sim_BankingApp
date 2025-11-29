@@ -153,3 +153,26 @@ def verify(payload: VerificationPayload, sessionId: str, db: Session = Depends(g
     del sessions[sessionId]
     
     return {"success": True, "userId": user.id}
+
+@app.get("/api/admin/check_citizen/{id_hash}")
+def check_citizen(id_hash: str, db: Session = Depends(get_db)):
+    """
+    [GOVERNMENT/ADMIN DEMO] Check if a citizen exists based on ID Hash.
+    This simulates a privacy-preserving query where the government checks 
+    if 'Hash(ID)' exists in the bank's database without revealing the ID to the bank 
+    (if the bank didn't already have it) or dumping the whole DB.
+    """
+    user = db.query(models.User).filter(models.User.id_hash == id_hash).first()
+    
+    if user:
+        return {
+            "exists": True,
+            "user_id": user.id,
+            "created_at": "2024-01-01" # In real app, fetch from created_at column
+        }
+    else:
+        return {"exists": False}
+
+
+def detect(img):
+    return random.choice([True, False])
