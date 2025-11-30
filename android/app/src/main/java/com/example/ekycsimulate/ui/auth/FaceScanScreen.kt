@@ -77,7 +77,7 @@ fun FaceScanScreen(
     var sendError by remember { mutableStateOf<String?>(null) }
     var inferenceResult by remember { mutableStateOf<com.example.ekycsimulate.model.EkycResult?>(null) }
     val modelManager = remember { com.example.ekycsimulate.model.EkycModelManager(context) }
-    var debugLog by remember { mutableStateOf("Sẵn sàng. Nhấn 'Bắt đầu quay' để test.") }
+
     
     // SIMULATION MODE: Change this to TRUE/FALSE to test Success/Failure scenarios
     val isSimulateSuccess = true
@@ -211,37 +211,14 @@ fun FaceScanScreen(
                         enrollmentPayload = null
                         zkpDetails = null
                         videoUri = null
-                        debugLog = "Sẵn sàng."
+
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("Chụp lại")
                 }
                 Spacer(modifier = Modifier.height(16.dp))
-                // Run simulation on frames
-                Button(onClick = {
-                    if (videoUri == null) { sendError = "Chưa có video"; return@Button }
-                    isProcessing = true
-                    scope.launch {
-                        delay(5000) // Simulate work
-                        isProcessing = false
-                        
-                        if (isSimulateSuccess) {
-                             approvalStatus = 1
-                             enrollmentPayload = null // Reset to trigger ZKP flow
-                             zkpDetails = null
-                             sendError = null
-                             // debugLog removed
-                        } else {
-                             approvalStatus = 0
-                             sendError = "SIMULATION (Retry): FAILED"
-                             // debugLog removed
-                        }
-                        randomDigits = generateRandomDigits()
-                    }
-                }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Chạy lại (Simulation Mode)")
-                }
+
             }
 
             approvalStatus == 1 && enrollmentPayload == null -> {
@@ -350,7 +327,7 @@ fun FaceScanScreen(
                     Button(
                         onClick = {
                             if (videoCapture == null) {
-                                debugLog = "LỖI: Camera chưa sẵn sàng (VideoCapture null)\n$debugLog"
+
                                 return@Button
                             }
                             
@@ -379,14 +356,14 @@ fun FaceScanScreen(
                                         when(recordEvent) {
                                             is VideoRecordEvent.Start -> {
                                                 isRecording = true
-                                                debugLog = "Đang quay video... (Đọc dãy số trên)\n"
+
                                             }
                                             is VideoRecordEvent.Finalize -> {
                                                 isRecording = false
                                                 if (!recordEvent.hasError()) {
                                                     val uri = recordEvent.outputResults.outputUri
                                                     videoUri = uri
-                                                    debugLog = "Video đã lưu tại: $uri\nĐang trích xuất frames...\n$debugLog"
+
                                                     
                                                     // Process video
                                                     scope.launch {
@@ -400,14 +377,12 @@ fun FaceScanScreen(
                                                                 // Extract 8 frames as requested
                                                                 val frames = extractFramesFromVideo(context, uri, 8)
                                                                 
-                                                                withContext(kotlinx.coroutines.Dispatchers.Main) {
-                                                                    debugLog = "Đã trích xuất ${frames.size} frames. Đang chạy model...\n$debugLog"
-                                                                }
+
                                                                 
                                                                 if (frames.isEmpty()) {
                                                                     withContext(kotlinx.coroutines.Dispatchers.Main) {
                                                                         sendError = "Không thể trích xuất frames từ video"
-                                                                        debugLog = "LỖI: Không trích xuất được frames nào.\n$debugLog"
+
                                                                     }
                                                                     return@withContext
                                                                 }
@@ -417,7 +392,7 @@ fun FaceScanScreen(
                                                                 if (idBmp == null) {
                                                                     withContext(kotlinx.coroutines.Dispatchers.Main) {
                                                                         sendError = "Không có ảnh CCCD để ghép với video"
-                                                                        debugLog = "LỖI: Thiếu ảnh CCCD đầu vào (croppedImage is null).\n$debugLog"
+
                                                                     }
                                                                     return@withContext
                                                                 }
@@ -444,7 +419,7 @@ fun FaceScanScreen(
                                                         } catch (e: Exception) {
                                                             withContext(kotlinx.coroutines.Dispatchers.Main) {
                                                                 sendError = e.message
-                                                                debugLog = "LỖI Xử lý: ${e.message}\n$debugLog"
+
                                                             }
                                                         } finally {
                                                             isProcessing = false
@@ -453,14 +428,14 @@ fun FaceScanScreen(
                                                 } else {
                                                     recording?.close()
                                                     recording = null
-                                                    debugLog = "LỖI Quay video: ${recordEvent.error}\n$debugLog"
+
                                                 }
                                             }
                                         }
                                     }
                                 recording = activeRecording
                             } catch (e: Exception) {
-                                debugLog = "LỖI Khởi tạo quay: ${e.message}\n$debugLog"
+
                             }
                         },
                         modifier = Modifier.weight(1f),
@@ -489,25 +464,7 @@ fun FaceScanScreen(
         }
         
         Spacer(modifier = Modifier.height(16.dp))
-        Text("Debug Logs (Cuộn để xem):", style = MaterialTheme.typography.labelMedium, color = Color.Gray)
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(120.dp),
-            colors = CardDefaults.cardColors(containerColor = Color.LightGray.copy(alpha = 0.3f))
-        ) {
-            SelectionContainer {
-                Text(
-                    text = debugLog,
-                    modifier = Modifier
-                        .padding(8.dp)
-                        .verticalScroll(rememberScrollState()),
-                    style = MaterialTheme.typography.bodySmall,
-                    fontSize = 10.sp,
-                    fontFamily = FontFamily.Monospace
-                )
-            }
-        }
+
     }
 }
 
