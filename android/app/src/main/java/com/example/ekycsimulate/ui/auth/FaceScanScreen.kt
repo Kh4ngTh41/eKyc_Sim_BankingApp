@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -77,7 +78,7 @@ fun FaceScanScreen(
     var isSending by remember { mutableStateOf(false) }
     var sendError by remember { mutableStateOf<String?>(null) }
     var inferenceResult by remember { mutableStateOf<com.example.ekycsimulate.model.EkycResult?>(null) }
-    val modelManager = remember { com.example.ekycsimulate.model.EkycModelManager(context) }
+
 
     
     // SIMULATION MODE: Disabled for real AI usage
@@ -95,6 +96,8 @@ fun FaceScanScreen(
         if (useFakeDetector) com.example.ekycsimulate.data.FakeFaceDetector() 
         else com.example.ekycsimulate.data.MLKitFaceDetector() 
     }
+
+    val modelManager = remember { com.example.ekycsimulate.model.EkycModelManager(context, faceDetector) }
 
     LaunchedEffect(Unit) {
         if (!hasCameraPermission) {
@@ -173,6 +176,7 @@ fun FaceScanScreen(
                             capturedImage = null
                             videoUri = null
                             isProcessing = false
+                            inferenceResult = null // Reset this too
                             randomDigits = generateRandomDigits()
                         },
                         modifier = Modifier.weight(1f)
@@ -471,9 +475,9 @@ fun FaceScanScreen(
                                                                              inferenceResult = ekycResult
                                                                         } else {
                                                                              approvalStatus = 0
-                                                                             // Format float to 2 decimal places
-                                                                             val live = String.format("%.2f", ekycResult.livenessProb)
-                                                                             val match = String.format("%.2f", ekycResult.matchingScore)
+                                                                             // Format float to 4 decimal places for debugging
+                                                                             val live = String.format("%.4f", ekycResult.livenessProb)
+                                                                             val match = String.format("%.4f", ekycResult.matchingScore)
                                                                              sendError = "Thất bại: Thật($live) - Khớp($match)"
                                                                         }
                                                                     }.onFailure { e ->
