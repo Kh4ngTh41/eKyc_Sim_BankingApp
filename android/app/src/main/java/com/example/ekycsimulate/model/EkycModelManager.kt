@@ -12,17 +12,24 @@ import java.io.FileOutputStream
 
 data class EkycResult(val livenessProb: Float, val matchingScore: Float) {
     fun isPassed(threshold: Float = 0.7f): Boolean {
-        return livenessProb > threshold && matchingScore > threshold
+        return livenessProb > 0.95 && matchingScore > 0.55
     }
 }
 
 class EkycModelManager(private val context: Context) {
     private var module: Module? = null
+    private val faceRecognitionManager = FaceRecognitionManager(context)
 
     init {
         try {
-            module = loadModuleFromAssets("ekyc_model_mobile.ptl")
-        } catch (e: Exception) {
+            // Priority: User mentioned ekyc_model_traced_no_opt_mobile.ptl
+            module = loadModuleFromAssets("ekyc_model_traced_no_opt_mobile.ptl")
+            if (module == null) {
+                module = loadModuleFromAssets("ekyc_model.ptl")
+            }
+            if (module == null) {
+                module = loadModuleFromAssets("ekyc_model_mobile.ptl")
+            }        } catch (e: Exception) {
             Log.e("EkycModelManager", "Failed to load model: ${e.message}")
         }
     }
@@ -50,15 +57,15 @@ class EkycModelManager(private val context: Context) {
     }
 
     private fun preprocessId(idBitmap: Bitmap): FloatArray {
-        return bitmapToFloatArrayCHW(idBitmap, 224, 224)
+        return bitmapToFloatArrayCHW(idBitmap, 256, 256)
     }
 
     private fun preprocessFrames(frames: List<Bitmap>): FloatArray {
         // Model expects: [1, T, C, H, W]
         // We return FloatArray in T,C,H,W layout (no batch dim, will add in runInference)
         val T = frames.size
-        val H = 224
-        val W = 224
+        val H = 256
+        val W = 256
         val HW = H * W
         val CHW = 3 * HW
         val out = FloatArray(T * CHW)
@@ -125,10 +132,11 @@ class EkycModelManager(private val context: Context) {
     fun runInference(frames: List<Bitmap>, idBitmap: Bitmap): Result<EkycResult> {
         Log.d("EkycModelManager", "runInference called with ${frames.size} frames")
         if (module == null) {
-            Log.e("EkycModelManager", "Module is null. Attempting to reload...")
-            module = loadModuleFromAssets("ekyc_model_mobile.ptl")
+            Log.e("EkycModelManager", "Module is null. Attempting to reload default...")
+            // Attempt reload if needed, though init should have tried.
+             module = loadModuleFromAssets("ekyc_model_traced_no_opt_mobile.ptl")
             if (module == null) {
-                return Result.failure(Exception("Failed to load model ekyc_model_mobile.ptl"))
+                return Result.failure(Exception("Failed to load model PTL"))
             }
         }
         val mod = module!!
@@ -139,54 +147,80 @@ class EkycModelManager(private val context: Context) {
                 return Result.failure(Exception("No frames provided for inference"))
             }
             
-            // 1. Preprocess ID Image
-            Log.d("EkycModelManager", "Preprocessing ID bitmap...")
+            // ---------------------------------------------------------
+            // 1. Run PTL Model for Liveness (Ignoring PTL Matching)
+            // ---------------------------------------------------------
+            
+            // Preprocess ID Image (Needed for PTL model input requirement, even if ignoring output)
             val idArr = preprocessId(idBitmap) 
-            // Shape: [1, 3, 224, 224]
-            val idTensor = Tensor.fromBlob(idArr, longArrayOf(1, 3, 224, 224))
+            val idTensor = Tensor.fromBlob(idArr, longArrayOf(1, 3, 256, 256))
 
-            // 2. Preprocess Video Frames
-            Log.d("EkycModelManager", "Preprocessing ${frames.size} frames...")
+            // Preprocess Video Frames
             val framesArr = preprocessFrames(frames)
-            // Shape: [1, T, 3, 224, 224]
-            val framesTensor = Tensor.fromBlob(framesArr, longArrayOf(1, T.toLong(), 3, 224, 224))
+            val framesTensor = Tensor.fromBlob(framesArr, longArrayOf(1, T.toLong(), 3, 256, 256))
 
-            // DEBUG: Check tensor values
-            val idMean = idArr.average()
-            val framesMean = framesArr.average()
-            val idStd = kotlin.math.sqrt(idArr.map { (it - idMean) * (it - idMean) }.average())
-            val framesStd = kotlin.math.sqrt(framesArr.map { (it - framesMean) * (it - framesMean) }.average())
-            
-            Log.d("EkycModelManager", "ID Tensor: size=${idArr.size}, mean=$idMean, std=$idStd, first5=${idArr.take(5)}")
-            Log.d("EkycModelManager", "Frames Tensor: size=${framesArr.size}, mean=$framesMean, std=$framesStd, first5=${framesArr.take(5)}")
-
-            // 3. Prepare Inputs - Order: (ID, Video)
-            // Model forward: def forward(self, id_img, video_frames):
+            // Run PTL Inference
             val inputs = arrayOf(IValue.from(idTensor), IValue.from(framesTensor))
-            
-            Log.d("EkycModelManager", "Running forward pass with ID shape [1,3,224,224] and Video shape [1,$T,3,224,224]...")
             val outputs = mod.forward(*inputs)
+            
+            var livenessProb = 0f
             
             if (outputs.isTuple) {
                 val tuple = outputs.toTuple()
-                Log.d("EkycModelManager", "Output tuple size: ${tuple.size}")
+                if (tuple.size >= 1) {
+                     val livenessTensor = tuple[0].toTensor()
+                     livenessProb = livenessTensor.dataAsFloatArray[0]
+                     // Match tensor is tuple[1], but we ignore it as per requirement
+                } else {
+                     return Result.failure(Exception("Model output tuple too small"))
+                }
+            } else {
+                 return Result.failure(Exception("Unexpected model output type"))
+            }
+
+            // ---------------------------------------------------------
+            // 2. Run ONNX Model for Matching (InsightFace)
+            // ---------------------------------------------------------
+            Log.d("EkycModelManager", "Calculating matching score with ONNX...")
+            
+            var matchingScore = 0f
+            
+            // Get ID Embedding
+            val idEmbedding = faceRecognitionManager.getEmbedding(idBitmap)
+            
+            if (idEmbedding != null) {
+                var maxSim = -1f
+                var bestFrameIndex = -1
                 
-                if (tuple.size < 2) {
-                     return Result.failure(Exception("Model output tuple size mismatch. Expected >= 2, got ${tuple.size}"))
+                // Compare with each frame
+                // Optimization: Maybe we don't need to check ALL frames if there are many.
+                // But usually validation limits frames (e.g., 5-10).
+                
+                for ((index, frame) in frames.withIndex()) {
+                    val frameEmbedding = faceRecognitionManager.getEmbedding(frame)
+                    if (frameEmbedding != null) {
+                        val sim = faceRecognitionManager.calculateCosineSimilarity(idEmbedding, frameEmbedding)
+                        Log.d("EkycModelManager", "Frame $index similarity: $sim")
+                        if (sim > maxSim) {
+                            maxSim = sim
+                            bestFrameIndex = index
+                        }
+                    }
                 }
                 
-                val livenessTensor = tuple[0].toTensor()
-                val matchingTensor = tuple[1].toTensor()
-
-                val livenessProb = livenessTensor.dataAsFloatArray[0]
-                val matchingScore = matchingTensor.dataAsFloatArray[0]
-                
-                Log.d("EkycModelManager", "✅ Inference success: Liveness=$livenessProb, Matching=$matchingScore")
-                return Result.success(EkycResult(livenessProb, matchingScore))
+                if (maxSim > -1f) {
+                    matchingScore = maxSim
+                    Log.d("EkycModelManager", "Best matching score: $matchingScore (Frame $bestFrameIndex)")
+                } else {
+                    Log.w("EkycModelManager", "Could not calculate similarity (invalid frame embeddings)")
+                }
             } else {
-                Log.e("EkycModelManager", "❌ Unexpected model output type: $outputs")
-                return Result.failure(Exception("Unexpected model output type"))
+                 Log.e("EkycModelManager", "Failed to get ID embedding")
             }
+
+            Log.d("EkycModelManager", "✅ Final Result: Liveness=$livenessProb, Matching=$matchingScore")
+            return Result.success(EkycResult(livenessProb, matchingScore))
+
         } catch (e: Exception) {
             Log.e("EkycModelManager", "❌ Model inference failed", e)
             return Result.failure(e)
